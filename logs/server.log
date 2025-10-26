@@ -1,7 +1,19 @@
 INFO:     Will watch for changes in these directories: ['/home/workspace']
 INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
-INFO:     Started reloader process [599] using WatchFiles
-INFO:     Started server process [601]
+INFO:     Started reloader process [693] using WatchFiles
+INFO:     Started server process [695]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
-INFO:     172.20.0.1:34908 - "HEAD / HTTP/1.1" 404 Not Found
+INFO:     172.20.0.1:57902 - "HEAD / HTTP/1.1" 404 Not Found
+INFO:     172.20.0.1:53678 - "HEAD / HTTP/1.1" 404 Not Found
+INFO:     172.20.0.1:53700 - "GET /api/heatmap HTTP/1.1" 200 OK
+INFO:     172.20.0.1:53690 - "GET /api/analytics HTTP/1.1" 200 OK
+INFO:     172.20.0.1:53714 - "GET /api/signals HTTP/1.1" 200 OK
+INFO:     172.20.0.1:53700 - "GET /api/analytics HTTP/1.1" 200 OK
+INFO:     172.20.0.1:53690 - "GET /api/heatmap HTTP/1.1" 200 OK
+INFO:     172.20.0.1:53714 - "GET /api/signals HTTP/1.1" 200 OK
+INFO:     172.20.0.1:53714 - "GET /api/signals HTTP/1.1" 200 OK
+INFO:     172.20.0.1:53730 - "GET /api/heatmap HTTP/1.1" 200 OK
+INFO:     172.20.0.1:53714 - "GET /api/signals HTTP/1.1" 200 OK
+INFO:     172.20.0.1:53730 - "GET /api/analytics HTTP/1.1" 200 OK
+INFO:     172.20.0.1:53714 - "GET /api/signals HTTP/1.1" 200 OK
