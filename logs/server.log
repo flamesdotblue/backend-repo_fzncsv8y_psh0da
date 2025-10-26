@@ -17,3 +17,9 @@ INFO:     172.20.0.1:53730 - "GET /api/heatmap HTTP/1.1" 200 OK
 INFO:     172.20.0.1:53714 - "GET /api/signals HTTP/1.1" 200 OK
 INFO:     172.20.0.1:53730 - "GET /api/analytics HTTP/1.1" 200 OK
 INFO:     172.20.0.1:53714 - "GET /api/signals HTTP/1.1" 200 OK
+INFO:     172.20.0.1:53730 - "GET /api/analytics HTTP/1.1" 200 OK
+INFO:     172.20.0.1:53714 - "GET /api/signals HTTP/1.1" 200 OK
+INFO:     172.20.0.1:53730 - "GET /api/heatmap HTTP/1.1" 200 OK
+INFO:     172.20.0.1:53714 - "GET /api/analytics HTTP/1.1" 200 OK
+INFO:     172.20.0.1:53730 - "GET /api/heatmap HTTP/1.1" 200 OK
+INFO:     172.20.0.1:42142 - "GET /api/signals HTTP/1.1" 200 OK
