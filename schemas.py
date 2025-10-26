@@ -12,15 +12,10 @@ Model name is converted to lowercase for the collection name:
 """
 
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, List
 
-# Example schemas (replace with your own):
-
+# Example schemas (retain for reference):
 class User(BaseModel):
-    """
-    Users collection schema
-    Collection name: "user" (lowercase of class name)
-    """
     name: str = Field(..., description="Full name")
     email: str = Field(..., description="Email address")
     address: str = Field(..., description="Address")
@@ -28,21 +23,36 @@ class User(BaseModel):
     is_active: bool = Field(True, description="Whether user is active")
 
 class Product(BaseModel):
-    """
-    Products collection schema
-    Collection name: "product" (lowercase of class name)
-    """
     title: str = Field(..., description="Product title")
     description: Optional[str] = Field(None, description="Product description")
     price: float = Field(..., ge=0, description="Price in dollars")
     category: str = Field(..., description="Product category")
     in_stock: bool = Field(True, description="Whether product is in stock")
 
-# Add your own schemas here:
-# --------------------------------------------------
+# Trading-related schemas used by the app
+class Signal(BaseModel):
+    pair: str
+    type: str  # LONG or SHORT
+    price: float
+    confidence: int
+    size_usdt: float
+    leverage: int
+    entry_low: float
+    entry_high: float
+    tp1: float
+    tp2: float
+    tp3: float
+    sl: float
+    risk_usdt: float
+    capital_example: float
+    projected_roi_pct: float
+    reason: str
+    timestamp: int
 
-# Note: The Flames database viewer will automatically:
-# 1. Read these schemas from GET /schema endpoint
-# 2. Use them for document validation when creating/editing
-# 3. Handle all database operations (CRUD) directly
-# 4. You don't need to create any database endpoints!
+class SignalPerformance(BaseModel):
+    signal_id: str
+    pair: str
+    outcome: str  # hit_tp, hit_sl, breakeven, open
+    roi_pct: float
+    closed_at: Optional[int] = None
+    notes: Optional[str] = None
