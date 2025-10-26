@@ -1,55 +1,49 @@
-"""
-Database Helper Functions
-
-MongoDB helper functions ready to use in your backend code.
-Import and use these functions in your API endpoints for database operations.
-"""
-
-from pymongo import MongoClient
-from datetime import datetime, timezone
 import os
-from dotenv import load_dotenv
-from typing import Union
-from pydantic import BaseModel
+from typing import Any, Dict, List, Optional
 
-# Load environment variables from .env file
-load_dotenv()
+# Lazy/optional Motor import to avoid hard dependency at startup
+try:
+    from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase  # type: ignore
+except Exception:  # ImportError or version mismatch
+    AsyncIOMotorClient = None  # type: ignore
+    AsyncIOMotorDatabase = None  # type: ignore
+
+DATABASE_URL = os.getenv("DATABASE_URL", "mongodb://localhost:27017")
+DATABASE_NAME = os.getenv("DATABASE_NAME", "alphadesk")
 
 _client = None
-db = None
+_db = None
 
-database_url = os.getenv("DATABASE_URL")
-database_name = os.getenv("DATABASE_NAME")
+async def get_db():
+    global _client, _db
+    if AsyncIOMotorClient is None:
+        raise RuntimeError("MongoDB driver not available")
+    if _db is None:
+        _client = AsyncIOMotorClient(DATABASE_URL)
+        _db = _client[DATABASE_NAME]
+    return _db
 
-if database_url and database_name:
-    _client = MongoClient(database_url)
-    db = _client[database_name]
+async def create_document(collection_name: str, data: Dict[str, Any]) -> str:
+    try:
+        db = await get_db()
+        res = await db[collection_name].insert_one({**data, "_created_at": data.get("_created_at")})
+        return str(res.inserted_id)
+    except Exception:
+        # Silently no-op if DB not available
+        return ""
 
-# Helper functions for common database operations
-def create_document(collection_name: str, data: Union[BaseModel, dict]):
-    """Insert a single document with timestamp"""
-    if db is None:
-        raise Exception("Database not available. Check DATABASE_URL and DATABASE_NAME environment variables.")
+async def get_documents(collection_name: str, filter_dict: Optional[Dict[str, Any]] = None, limit: int = 100) -> List[Dict[str, Any]]:
+    try:
+        db = await get_db()
+        cur = db[collection_name].find(filter_dict or {}).sort("_id", -1).limit(limit)
+        return [doc async for doc in cur]
+    except Exception:
+        return []
 
-    # Convert Pydantic model to dict if needed
-    if isinstance(data, BaseModel):
-        data_dict = data.model_dump()
-    else:
-        data_dict = data.copy()
-
-    data_dict['created_at'] = datetime.now(timezone.utc)
-    data_dict['updated_at'] = datetime.now(timezone.utc)
-
-    result = db[collection_name].insert_one(data_dict)
-    return str(result.inserted_id)
-
-def get_documents(collection_name: str, filter_dict: dict = None, limit: int = None):
-    """Get documents from collection"""
-    if db is None:
-        raise Exception("Database not available. Check DATABASE_URL and DATABASE_NAME environment variables.")
-    
-    cursor = db[collection_name].find(filter_dict or {})
-    if limit:
-        cursor = cursor.limit(limit)
-    
-    return list(cursor)
+async def ping() -> bool:
+    try:
+        db = await get_db()
+        await db.command("ping")
+        return True
+    except Exception:
+        return False

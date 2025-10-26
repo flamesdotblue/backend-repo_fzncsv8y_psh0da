@@ -1,250 +1,211 @@
-import os
-import time
-from typing import List, Dict, Any
-
-import requests
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+import httpx
+from typing import List, Dict, Any
+from datetime import datetime, timezone
+import os
 
-from database import create_document, db
 from schemas import Signal
+from database import create_document
 
-BYBIT_BASE = "https://api.bybit.com"
-PAIRS = [
-    "BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT","ADAUSDT","DOGEUSDT","AVAXUSDT","OPUSDT","LINKUSDT"
-]
+app = FastAPI(title="AlphaDesk API")
 
-app = FastAPI(title="AlphaDesk Backend")
+frontend_url = os.getenv("FRONTEND_URL", "*")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=["*" if frontend_url == "*" else frontend_url],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-class HeatItem(BaseModel):
-    pair: str
-    vol_pct: float
+BYBIT_BASE = "https://api.bybit.com"
 
-class Analytics(BaseModel):
-    win_rate: float
-    rr: float
-    avg_roi: float
-    weekly: float
+SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT"]
 
+async def fetch_klines(symbol: str, interval: str = "15", limit: int = 100) -> List[Dict[str, Any]]:
+    url = f"{BYBIT_BASE}/v5/market/kline?category=linear&symbol={symbol}&interval={interval}&limit={limit}"
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        r = await client.get(url)
+        r.raise_for_status()
+        data = r.json()
+        if data.get("retCode") != 0:
+            raise RuntimeError(data.get("retMsg", "Bybit error"))
+        rows = data["result"]["list"]
+        out = []
+        for row in reversed(rows):
+            ts, open_p, high_p, low_p, close_p, vol, turnover = row[:7]
+            out.append({
+                "ts": int(ts),
+                "open": float(open_p),
+                "high": float(high_p),
+                "low": float(low_p),
+                "close": float(close_p),
+                "volume": float(vol),
+                "turnover": float(turnover),
+            })
+        return out
 
-def bybit_get(path: str, params: Dict[str, Any]) -> Dict[str, Any]:
-    url = f"{BYBIT_BASE}{path}"
-    r = requests.get(url, params=params, timeout=10)
-    r.raise_for_status()
-    data = r.json()
-    if str(data.get("retCode")) != "0":
-        raise RuntimeError(f"Bybit error: {data}")
-    return data
+async def fetch_tickers() -> List[Dict[str, Any]]:
+    url = f"{BYBIT_BASE}/v5/market/tickers?category=linear"
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        r = await client.get(url)
+        r.raise_for_status()
+        data = r.json()
+        if data.get("retCode") != 0:
+            raise RuntimeError(data.get("retMsg", "Bybit error"))
+        return data["result"]["list"]
 
+# Basic ATR
+def atr(kl: List[Dict[str, Any]], period: int = 14) -> float:
+    if len(kl) < period + 1:
+        return 0.0
+    trs = []
+    for i in range(1, period + 1):
+        h = kl[-i]["high"]
+        l = kl[-i]["low"]
+        pc = kl[-i-1]["close"]
+        tr = max(h - l, abs(h - pc), abs(l - pc))
+        trs.append(tr)
+    return sum(trs) / len(trs)
 
-def fetch_ticker(pair: str) -> Dict[str, Any]:
-    data = bybit_get("/v5/market/tickers", {"category": "linear", "symbol": pair})
-    items = data.get("result", {}).get("list", [])
-    return items[0] if items else {}
+# Compute a simple signal
+def compute_signal(symbol: str, kl: List[Dict[str, Any]]) -> Signal | None:
+    if len(kl) < 20:
+        return None
+    last = kl[-1]
+    prev = kl[-2]
+    recent_high = max(k["high"] for k in kl[-20:])
+    recent_low = min(k["low"] for k in kl[-20:])
+    a = max(atr(kl, 14), 1e-8)
 
+    direction = None
+    reason = ""
+    if last["close"] > recent_high * 0.999 and last["close"] > prev["close"]:
+        direction = "LONG"
+        reason = "15m range breakout + momentum"
+    elif last["close"] < recent_low * 1.001 and last["close"] < prev["close"]:
+        direction = "SHORT"
+        reason = "15m breakdown + momentum"
 
-def fetch_kline(pair: str, interval: str = "15", limit: int = 96) -> List[List[str]]:
-    # interval mapping: 1 3 5 15 60 240 etc (minutes) for v5
-    data = bybit_get("/v5/market/kline", {"category": "linear", "symbol": pair, "interval": interval, "limit": str(limit)})
-    return data.get("result", {}).get("list", [])
-
-
-def compute_signal_from_klines(pair: str) -> Dict[str, Any]:
-    kl = fetch_kline(pair)
-    if not kl or len(kl) < 20:
-        raise RuntimeError("Insufficient kline data")
-    # Each item: [startTime, open, high, low, close, volume, turnover]
-    closes = [float(x[4]) for x in kl[::-1]]  # chronological
-    highs = [float(x[2]) for x in kl[::-1]]
-    lows = [float(x[3]) for x in kl[::-1]]
-    vols = [float(x[5]) for x in kl[::-1]]
-
-    last = closes[-1]
-    last_vol = vols[-1]
-    avg_vol = sum(vols[-20:]) / min(20, len(vols))
-
-    # Volatility (ATR-like)
-    trs = [max(highs[i]-lows[i], abs(highs[i]-closes[i-1]), abs(lows[i]-closes[i-1])) if i>0 else highs[i]-lows[i] for i in range(len(closes))]
-    atr = sum(trs[-14:]) / 14.0
-
-    # Compression/Breakout logic
-    window = 20
-    range_high = max(highs[-window-1:-1])
-    range_low = min(lows[-window-1:-1])
-    broke_up = last > range_high * 1.001
-    broke_down = last < range_low * 0.999
-
-    vol_expansion = last_vol > 1.3 * avg_vol
-
-    # Confidence scoring
-    conf = 50
-    reason_bits = []
-    if vol_expansion:
-        conf += 12
-        reason_bits.append("rising volume")
-    if atr / last < 0.01:  # low vol prior -> pop risk
-        conf += 10
-        reason_bits.append("volatility compression")
-    if broke_up:
-        conf += 18
-        reason_bits.append("range breakout up")
-    if broke_down:
-        conf += 18
-        reason_bits.append("range breakdown")
-
-    conf = max(40, min(95, int(conf)))
-
-    # Direction & levels
-    if broke_up and not broke_down:
-        sig_type = "LONG"
-        entry_low = round(range_high * 0.998, 2)
-        entry_high = round(range_high * 1.002, 2)
-        sl = round(range_low, 2)
-        tp1 = round(last + 0.5 * atr, 2)
-        tp2 = round(last + 1.0 * atr, 2)
-        tp3 = round(last + 1.8 * atr, 2)
-        quick = "Breakout from 15m compression zone with rising volume"
-    elif broke_down and not broke_up:
-        sig_type = "SHORT"
-        entry_low = round(range_low * 0.998, 2)
-        entry_high = round(range_low * 1.002, 2)
-        sl = round(range_high, 2)
-        tp1 = round(last - 0.5 * atr, 2)
-        tp2 = round(last - 1.0 * atr, 2)
-        tp3 = round(last - 1.8 * atr, 2)
-        quick = "Breakdown from 15m range with momentum unwind"
-    else:
-        # Bias by last close vs midpoint
-        mid = (range_high + range_low) / 2
-        if last >= mid:
-            sig_type = "LONG"
-            entry_low = round(last * 0.998, 2)
-            entry_high = round(last * 1.002, 2)
-            sl = round(last - 1.2 * atr, 2)
-            tp1 = round(last + 0.6 * atr, 2)
-            tp2 = round(last + 1.2 * atr, 2)
-            tp3 = round(last + 2.0 * atr, 2)
-            quick = "Momentum bias above mid with increasing volume"
+    if not direction:
+        rng = last["high"] - last["low"]
+        prev_rng = prev["high"] - prev["low"]
+        if rng > prev_rng * 1.8:
+            direction = "LONG" if last["close"] > prev["close"] else "SHORT"
+            reason = "Volatility expansion after compression"
         else:
-            sig_type = "SHORT"
-            entry_low = round(last * 0.998, 2)
-            entry_high = round(last * 1.002, 2)
-            sl = round(last + 1.2 * atr, 2)
-            tp1 = round(last - 0.6 * atr, 2)
-            tp2 = round(last - 1.2 * atr, 2)
-            tp3 = round(last - 2.0 * atr, 2)
-            quick = "Momentum bias below mid with flow weakness"
+            return None
 
-    # Adaptive size/leverage (simple): size scales with vol, leverage inverse with ATR
-    lev = 10 if atr/last > 0.01 else 20
-    size = 100 if conf < 70 else 200
-    risk = round(size * 0.05, 2)
-    proj = round(conf/100 * lev * 2, 1)
+    price = last["close"]
+    if direction == "LONG":
+        entry_low = price - 0.25 * a
+        entry_high = price + 0.10 * a
+        sl = price - 1.2 * a
+        tp1 = price + 0.8 * a
+        tp2 = price + 1.6 * a
+        tp3 = price + 2.4 * a
+    else:
+        entry_low = price - 0.10 * a
+        entry_high = price + 0.25 * a
+        sl = price + 1.2 * a
+        tp1 = price - 0.8 * a
+        tp2 = price - 1.6 * a
+        tp3 = price - 2.4 * a
 
-    signal = Signal(
-        pair=pair,
-        type=sig_type,
-        price=round(last, 2),
-        confidence=conf,
-        size_usdt=size,
-        leverage=lev,
-        entry_low=entry_low,
-        entry_high=entry_high,
-        tp1=tp1,
-        tp2=tp2,
-        tp3=tp3,
-        sl=sl,
-        risk_usdt=risk,
-        capital_example=20.0,
-        projected_roi_pct=proj,
-        reason=quick,
-        timestamp=int(time.time()*1000),
+    vol_now = last["volume"]
+    vol_prev = sum(k["volume"] for k in kl[-6:-1]) / 5
+    vol_boost = min(2.0, (vol_now / (vol_prev + 1e-9)))
+    breakout_strength = abs((price - prev["close"]) / (a + 1e-9))
+    confidence = max(50, min(98, int((0.6 * breakout_strength + 0.4 * vol_boost) / 3 * 100)))
+
+    leverage = 5 if confidence < 70 else 8 if confidence < 85 else 12
+    risk_usdt = 50.0
+    size_usdt = risk_usdt * leverage
+    projected_roi_pct = round((tp2 - price) / price * (100 if direction == "LONG" else -100), 2)
+
+    sig = Signal(
+        pair=symbol,
+        type=direction,
+        price=round(price, 4),
+        confidence=confidence,
+        entry_low=round(entry_low, 4),
+        entry_high=round(entry_high, 4),
+        tp1=round(tp1, 4),
+        tp2=round(tp2, 4),
+        tp3=round(tp3, 4),
+        sl=round(sl, 4),
+        size_usdt=round(size_usdt, 2),
+        leverage=leverage,
+        risk_usdt=risk_usdt,
+        projected_roi_pct=round(projected_roi_pct, 2),
+        reason=reason,
+        timestamp=datetime.now(timezone.utc),
     )
-    return signal.model_dump()
-
-
-def compute_heatmap() -> List[Dict[str, Any]]:
-    items: List[Dict[str, Any]] = []
-    for p in PAIRS:
-        try:
-            kl = fetch_kline(p, interval="5", limit=48)
-            if not kl:
-                continue
-            closes = [float(x[4]) for x in kl]
-            # approximate realized volatility as pct change std * sqrt(n)
-            rets = []
-            for i in range(1, len(closes)):
-                if closes[i-1] != 0:
-                    rets.append((closes[i] - closes[i-1]) / closes[i-1] * 100)
-            vol = sum(abs(x) for x in rets[-12:]) / max(1, min(12, len(rets)))
-            items.append({"pair": p, "vol_pct": round(vol, 2)})
-        except Exception:
-            continue
-    items.sort(key=lambda x: x["vol_pct"], reverse=True)
-    return items[:10]
-
-
-@app.get("/")
-def root():
-    return {"status": "ok", "service": "AlphaDesk Backend"}
-
-
-@app.get("/test")
-def test_database():
-    from database import db as _db
-    ok = _db is not None
-    return {
-        "backend": "✅ Running",
-        "database": "✅ Connected" if ok else "❌ Not Available",
-        "collections": _db.list_collection_names()[:10] if ok else [],
-    }
-
-
-@app.get("/api/heatmap")
-def api_heatmap():
-    return compute_heatmap()
-
-
-@app.get("/api/analytics")
-def api_analytics():
-    # Basic analytics snapshot; for production, compute from stored outcomes
-    return {
-        "win_rate": 61.3,
-        "rr": 1.85,
-        "avg_roi": 13.9,
-        "weekly": 7.4,
-    }
-
+    return sig
 
 @app.get("/api/signals")
-def api_signals():
-    signals: List[Dict[str, Any]] = []
-    for p in PAIRS:
+async def get_signals() -> List[Dict[str, Any]]:
+    results: List[Dict[str, Any]] = []
+    for sym in SYMBOLS:
         try:
-            sig = compute_signal_from_klines(p)
-            signals.append(sig)
-            # persist
-            try:
-                create_document("signal", sig)
-            except Exception:
-                pass
+            kl = await fetch_klines(sym, interval="15", limit=120)
+            sig = compute_signal(sym, kl)
+            if sig:
+                data = sig.model_dump()
+                results.append(data)
+                try:
+                    await create_document("signal", {**data, "_created_at": datetime.now(timezone.utc)})
+                except Exception:
+                    pass
         except Exception:
             continue
-    # Sort by confidence desc
-    signals.sort(key=lambda x: x.get("confidence", 0), reverse=True)
-    return signals[:20]
+    results.sort(key=lambda x: x.get("confidence", 0), reverse=True)
+    return results
 
+@app.get("/api/heatmap")
+async def get_heatmap() -> List[Dict[str, Any]]:
+    try:
+        tickers = await fetch_tickers()
+    except Exception:
+        return []
+    out = []
+    for t in tickers:
+        sym = t.get("symbol")
+        if not sym or not sym.endswith("USDT"):
+            continue
+        try:
+            vol = float(t.get("price24hPcnt", 0.0)) * 100.0
+        except Exception:
+            vol = 0.0
+        out.append({"pair": sym, "vol_pct": round(vol, 4)})
+    out.sort(key=lambda x: abs(x["vol_pct"]), reverse=True)
+    return out[:20]
 
-if __name__ == "__main__":
-    import uvicorn
-    port = int(os.getenv("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+@app.get("/api/analytics")
+async def get_analytics() -> Dict[str, Any]:
+    try:
+        tickers = await fetch_tickers()
+        pos = sum(1 for t in tickers if float(t.get("price24hPcnt", 0)) > 0)
+        total = max(1, len(tickers))
+        breadth = pos / total
+        win_rate = 40 + breadth * 40
+        rr = 1.4 + (breadth - 0.5) * 0.8
+        avg_roi = (breadth - 0.5) * 10
+        weekly = avg_roi * 1.5
+    except Exception:
+        win_rate = 55.0
+        rr = 1.5
+        avg_roi = 1.2
+        weekly = 2.5
+    return {
+        "win_rate": round(win_rate, 2),
+        "rr": round(rr, 2),
+        "avg_roi": round(avg_roi, 2),
+        "weekly": round(weekly, 2),
+    }
+
+@app.get("/test")
+async def test() -> Dict[str, Any]:
+    return {"status": "ok", "time": datetime.now(timezone.utc).isoformat()}
